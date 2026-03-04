@@ -80,6 +80,7 @@ def _normalize_date(date_str: str) -> str | None:
         "%d-%m-%Y",      # 15-05-1990
         "%d.%m.%Y",      # 15.05.1990
         "%d %m %Y",      # 15 05 1990
+        "%d%m%Y",        # 15051990 (Sem pontuação)
     ]
     for fmt in formats:
         try:

@@ -88,6 +88,13 @@ class CreditAgent:
         score = credit_info["score"]
         current_limit = credit_info["limite_credito"]
 
+        # Se a última mensagem adicionada é uma resposta do agente (ex: vinda da entrevista)
+        # e o agente atual mudou para 'credit', nós não processamos a mensagem do usuário novamente.
+        if messages and isinstance(messages[-1], AIMessage):
+             # Isso garante que se acabamos de retornar de outro agente de forma assíncrona/handoff
+             # nós não reprocessamos a resposta anterior do usuário.
+             return {"current_agent": "credit"}
+
         # Verificar a última mensagem do usuário
         human_messages = [m for m in messages if isinstance(m, HumanMessage)]
         if not human_messages:
@@ -115,7 +122,7 @@ class CreditAgent:
             }
 
         # Verificar se mencionou entrevista de crédito
-        if self._wants_interview(last_message):
+        if self._wants_interview(last_message, credit_request_data):
             response = (
                 f"Ótima escolha, {first_name}! 📝 Vamos iniciar uma breve entrevista "
                 f"para reavaliar seu perfil de crédito.\n\n"
@@ -135,7 +142,7 @@ class CreditAgent:
             )
 
         # Checar intenção geral
-        if self._wants_increase(last_message):
+        if self._wants_increase(last_message, credit_request_data):
             response = (
                 f"{first_name}, para solicitar um aumento de limite, "
                 f"me informe o **valor desejado** para seu novo limite.\n\n"
@@ -176,6 +183,7 @@ class CreditAgent:
         return {
             "messages": [AIMessage(content=response)],
             "current_agent": "credit",
+            "credit_request_data": {"status": "info_shown"},
         }
 
     def _process_limit_increase(
@@ -247,25 +255,37 @@ class CreditAgent:
 
     def _extract_value(self, text: str) -> float | None:
         """Extrai valor monetário de uma mensagem."""
-        # Padrão: R$ 5.000, R$ 5000, 5000, 5.000,00
         text_clean = text.lower().replace("r$", "").strip()
 
-        # Tenta formato brasileiro: 5.000,00 ou 5.000
-        match = re.search(r"(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)", text_clean)
-        if match:
-            value_str = match.group(1).replace(".", "").replace(",", ".")
-            try:
-                return float(value_str)
-            except ValueError:
-                pass
+        # Tratar os 'k' (ex: 30k)
+        k_match = re.search(r"(\d+(?:[.,]\d+)?)\s*k\b", text_clean)
+        if k_match:
+            val_str = k_match.group(1).replace(",", ".")
+            return float(val_str) * 1000
 
-        # Tenta formato simples: 5000 ou 5000.00
-        match = re.search(r"(\d+(?:\.\d{2})?)", text_clean)
-        if match:
-            try:
-                return float(match.group(1))
-            except ValueError:
-                pass
+        # Pega qualquer sequencia de digitos com possiveis pontos ou virgulas
+        number_match = re.search(r"\b(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\b", text_clean)
+        if number_match:
+            raw = number_match.group(1)
+            # conta quantos digitos apos ultimo delimitador
+            if ',' in raw and '.' in raw:
+                # ex 5.000,00
+                val_str = raw.replace('.', '').replace(',', '.')
+                return float(val_str)
+            elif ',' in raw:
+                parts = raw.split(',')
+                if len(parts[-1]) in [1, 2]:
+                    return float(raw.replace(',', '.'))
+                else:
+                    return float(raw.replace(',', ''))
+            elif '.' in raw:
+                parts = raw.split('.')
+                if len(parts[-1]) in [1, 2]:
+                    return float(raw)
+                else:
+                    return float(raw.replace('.', ''))
+            else:
+                return float(raw)
 
         # Tenta via LLM como fallback
         try:
@@ -286,13 +306,20 @@ class CreditAgent:
         return any(re.search(p, message.lower()) for p in end_patterns)
 
     @staticmethod
-    def _wants_increase(message: str) -> bool:
+    def _wants_increase(message: str, credit_request_data: dict | None = None) -> bool:
+        msg_lower = message.lower().strip()
+        
+        # Se exibimos a info de crédito e perguntamos "Deseja solicitar aumento?", e o usuário diz sim
+        if credit_request_data and credit_request_data.get("status") in ["info_shown"]:
+            # Aceita apenas respostas curtas afirmativas, pois se ele descrever a intenção as regras normais pegam.
+            if re.match(r"^(sim|isso|exato|positivo|com certeza|quero|gostaria|pode ser|bora|vamos)[!\.,\s]*$", msg_lower):
+                return True
+                
         patterns = [
-            r"\b(aument|subi|elev|altera|muda|alter)\w*\b.*\b(limit|cr[eé]dit)\w*\b",
-            r"\b(limit|cr[eé]dit)\w*\b.*\b(aument|subi|elev|maior|alter)\w*\b",
-            r"\b(quero|gostaria|preciso|queria)\b.*\b(aument|limit)\w*\b",
+            r"\b(aument|subi|elev|altera|muda|alter|mais|maior|novo)\w*\b.*\b(limit|cr[eé]dit)\w*\b",
+            r"\b(limit|cr[eé]dit)\w*\b.*\b(aument|subi|elev|maior|alter|mais|novo)\w*\b",
+            r"\b(quero|gostaria|preciso|queria)\b.*\b(aumenta|mais limite|limite maior)\b",
         ]
-        msg_lower = message.lower()
         return any(re.search(p, msg_lower) for p in patterns)
 
     @staticmethod
@@ -311,10 +338,19 @@ class CreditAgent:
         return any(re.search(p, message.lower()) for p in patterns)
 
     @staticmethod
-    def _wants_interview(message: str) -> bool:
-        patterns = [
-            r"\b(sim|quero|aceito|bora|vamos|pode|claro|ok)\b",
-            r"\b(entrevista|entr)\w*\b",
-        ]
+    def _wants_interview(message: str, credit_request_data: dict | None = None) -> bool:
         msg_lower = message.lower()
+        
+        # Se um aumento foi rejeitado recentemente e a entrevista foi oferecida
+        if credit_request_data and credit_request_data.get("status") == "rejeitado":
+            patterns = [
+                r"\b(sim|quero|aceito|bora|vamos|pode|claro|ok)\b",
+                r"\b(entrevista|entr)\w*\b",
+            ]
+        else:
+            # Caso contrário, exige que o usuário cite 'entrevista' explicitamente
+            patterns = [
+                r"\b(entrevista|entr)\w*\b",
+            ]
+            
         return any(re.search(p, msg_lower) for p in patterns)

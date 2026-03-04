@@ -72,12 +72,13 @@ def _extract_cpf(text: str) -> str | None:
 
 def _extract_date(text: str) -> str | None:
     """Extrai data de nascimento de uma string."""
-    # Formatos: DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY, YYYY-MM-DD
+    # Formatos: DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY, YYYY-MM-DD e DDMMAAAA
     patterns = [
         r"\d{2}/\d{2}/\d{4}",
         r"\d{2}-\d{2}-\d{4}",
         r"\d{2}\.\d{2}\.\d{4}",
         r"\d{4}-\d{2}-\d{2}",
+        r"\b\d{8}\b"
     ]
     for pattern in patterns:
         match = re.search(pattern, text)
@@ -157,11 +158,24 @@ class TriageAgent:
                     "current_agent": "triage",
                 }
             else:
-                response = (
-                    "Desculpe, não consegui identificar um CPF válido. "
-                    "Por favor, informe seu CPF com 11 dígitos "
-                    "(exemplo: 123.456.789-01 ou 12345678901)."
-                )
+                # Deixar o LLM responder de forma amigável se o usuário não enviou o CPF
+                try:
+                    sys_msg = SystemMessage(
+                        content=_TRIAGE_SYSTEM_PROMPT
+                    )
+                    reminder_msg = SystemMessage(
+                        content="ATENÇÃO ESTRITA: O sistema técnico não encontrou um CPF válido (11 dígitos) na última mensagem do usuário. Você NÃO PODE prosseguir com nenhum atendimento, NÃO PODE confirmar identidade, e NÃO PODE oferecer serviços. Responda amigavelmente ao que o usuário disse e exija que ele digite o CPF."
+                    )
+                    llm_response = self._llm.invoke([sys_msg] + messages + [reminder_msg])
+                    response = llm_response.content
+                except Exception as e:
+                    logger.error("Erro ao gerar resposta com LLM: %s", e)
+                    response = (
+                        "Desculpe, não consegui identificar um CPF válido. "
+                        "Por favor, informe seu CPF com 11 dígitos "
+                        "(exemplo: 123.456.789-01 ou 12345678901)."
+                    )
+                
                 return {
                     "messages": [AIMessage(content=response)],
                     "current_agent": "triage",
@@ -173,11 +187,24 @@ class TriageAgent:
             if date:
                 collected_birth_date = date
             else:
-                response = (
-                    "Desculpe, não consegui identificar a data. "
-                    "Por favor, informe no formato **DD/MM/AAAA** "
-                    "(exemplo: 15/05/1990)."
-                )
+                # Deixar o LLM responder de forma amigável se o usuário não enviou a data de nascimento
+                try:
+                    sys_msg = SystemMessage(
+                        content=_TRIAGE_SYSTEM_PROMPT
+                    )
+                    reminder_msg = SystemMessage(
+                        content="ATENÇÃO ESTRITA: O sistema técnico rejeitou a última mensagem porque não contém uma data válida (ex. DD/MM/AAAA). O usuário já informou o CPF, mas FALTA A DATA DE NASCIMENTO. Você NÃO PODE oferecer serviços, nem concluir a autenticação ainda. Peça que ele forneça a data de nascimento."
+                    )
+                    llm_response = self._llm.invoke([sys_msg] + messages[:-1] + [messages[-1], reminder_msg])
+                    response = llm_response.content
+                except Exception as e:
+                    logger.error("Erro ao gerar resposta com LLM: %s", e)
+                    response = (
+                        "Desculpe, não consegui identificar a data. "
+                        "Por favor, informe no formato **DD/MM/AAAA** "
+                        "(exemplo: 15/05/1990)."
+                    )
+                
                 return {
                     "messages": [AIMessage(content=response)],
                     "current_agent": "triage",

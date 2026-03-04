@@ -29,7 +29,6 @@ _INTERVIEW_QUESTIONS = [
     {
         "field": "renda_mensal",
         "question": (
-            "Vamos começar a entrevista! 📝\n\n"
             "**Pergunta 1/5:** Qual é sua **renda mensal** bruta (em R$)?"
         ),
         "type": "float",
@@ -93,6 +92,7 @@ class CreditInterviewAgent:
         cpf = client_data.get("cpf", "")
 
         human_messages = [m for m in messages if isinstance(m, HumanMessage)]
+        ai_messages = [m for m in messages if isinstance(m, AIMessage)]
 
         # Verificar se quer encerrar
         if human_messages:
@@ -109,34 +109,51 @@ class CreditInterviewAgent:
                     "interview_data": None,
                 }
 
-        # Determinar em qual pergunta estamos
         current_step = len(interview_data)
 
-        # Se temos uma resposta pendente para processar
-        if human_messages and current_step > 0 and current_step <= len(_INTERVIEW_QUESTIONS):
-            prev_question = _INTERVIEW_QUESTIONS[current_step - 1]
+        # Detectar se a última AI message era uma das nossas perguntas.
+        # Isso diferencia a primeira ativação (onde o triage nos mandou
+        # e precisamos apenas exibir a Q1) da segunda+ ativação (onde
+        # o usuário respondeu a uma pergunta que nós fizemos).
+        waiting_for_answer = False
+        if ai_messages:
+            last_ai_content = ai_messages[-1].content
+            if "Pergunta" in last_ai_content:
+                waiting_for_answer = True
+
+        # Processar resposta pendente: current_step é o índice da pergunta
+        # que o usuário acabou de responder (ex: 0 para Q1, 1 para Q2).
+        if human_messages and waiting_for_answer and current_step < len(_INTERVIEW_QUESTIONS):
+            current_question = _INTERVIEW_QUESTIONS[current_step]
             last_answer = human_messages[-1].content
 
-            parsed_value = self._parse_answer(last_answer, prev_question["type"])
+            parsed_value = self._parse_answer(last_answer, current_question["type"])
 
             if parsed_value is None:
-                # Resposta inválida — pedir novamente
-                error_msg = self._get_error_message(prev_question["type"])
+                error_msg = self._get_error_message(current_question["type"])
                 return {
                     "messages": [AIMessage(content=error_msg)],
                     "current_agent": "credit_interview",
+                    "interview_data": interview_data,
                 }
 
-            interview_data[prev_question["field"]] = parsed_value
+            interview_data[current_question["field"]] = parsed_value
+            current_step += 1
 
         # Verificar se completou todas as perguntas
-        if len(interview_data) >= len(_INTERVIEW_QUESTIONS):
+        if current_step >= len(_INTERVIEW_QUESTIONS):
             return self._finalize_interview(cpf, first_name, interview_data, client_data)
 
         # Fazer a próxima pergunta
-        next_question = _INTERVIEW_QUESTIONS[len(interview_data)]
+        next_question = _INTERVIEW_QUESTIONS[current_step]
+        msg = next_question["question"]
+
+        # Na primeira ativação, adicionar texto de boas-vindas
+        if current_step == 0 and not waiting_for_answer:
+            msg = f"Vamos começar a entrevista! 📝\n\n{msg}"
+
         return {
-            "messages": [AIMessage(content=next_question["question"])],
+            "messages": [AIMessage(content=msg)],
             "current_agent": "credit_interview",
             "interview_data": interview_data,
         }
