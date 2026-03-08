@@ -41,5 +41,9 @@ class BankState(TypedDict):
     # Entrevista de crédito
     interview_data: dict[str, Any] | None
 
+    # Compliance
+    compliance_approved: bool
+    compliance_reason: str | None
+
     # Controle de fluxo
     should_end: bool

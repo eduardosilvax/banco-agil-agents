@@ -75,8 +75,8 @@ class ExchangeAgent:
             last_msg = human_messages[-1].content.lower()
             if self._wants_to_end(last_msg):
                 farewell = (
-                    f"Tudo bem, {first_name}! 😊 Se precisar de mais alguma cotação, "
-                    f"estou aqui. Obrigado! 👋"
+                    f"Tudo bem, {first_name}! Se precisar de mais alguma cotação, "
+                    f"estou aqui. Obrigado!"
                 )
                 return {
                     "messages": [AIMessage(content=farewell)],
@@ -87,14 +87,14 @@ class ExchangeAgent:
             # Verificar se quer ir para crédito
             if self._wants_credit(last_msg):
                 return {
-                    "messages": [AIMessage(content=f"Claro, {first_name}! Vou te ajudar com crédito. 💳")],
+                    "messages": [
+                        AIMessage(content=f"Claro, {first_name}! Vou te ajudar com crédito.")
+                    ],
                     "current_agent": "credit",
                 }
 
         # Identificar a moeda
-        currency = self._identify_currency(
-            human_messages[-1].content if human_messages else ""
-        )
+        currency = self._identify_currency(human_messages[-1].content if human_messages else "")
 
         # Consultar cotação
         rate = get_exchange_rate(currency)
@@ -104,14 +104,14 @@ class ExchangeAgent:
             response = (
                 f"{first_name}, aqui está a cotação que você pediu:\n\n"
                 f"{formatted}\n\n"
-                f"Deseja consultar outra moeda? 🌍 "
+                f"Deseja consultar outra moeda? "
                 f"Posso buscar: {', '.join(SUPPORTED_CURRENCIES.keys())}\n\n"
                 f"Ou posso te ajudar com outro serviço!"
             )
         else:
             response = (
                 f"Desculpe, {first_name}, não consegui obter a cotação de "
-                f"**{currency}** no momento. 😕\n\n"
+                f"**{currency}** no momento.\n\n"
                 f"Isso pode ser um problema temporário com o serviço de câmbio. "
                 f"Por favor, tente novamente em alguns instantes.\n\n"
                 f"Moedas disponíveis: {', '.join(SUPPORTED_CURRENCIES.keys())}"

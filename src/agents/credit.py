@@ -15,15 +15,19 @@ import re
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+from src.agents._helpers import format_brl
 from src.core.llm_factory import LLMFactory
 from src.schemas.state import BankState
 from src.tools.csv_tools import (
     check_score_limit,
     get_client_credit,
     register_credit_request,
+    update_client_limit,
+    update_credit_request_status,
 )
 
 logger = logging.getLogger("banco_agil.credit")
+audit_logger = logging.getLogger("banco_agil.audit.credit")
 
 _CREDIT_SYSTEM_PROMPT = """\
 Você é o especialista em crédito do Banco Ágil.
@@ -34,7 +38,7 @@ Seja claro, objetivo e atencioso.
 O cliente já foi autenticado. Seus dados são:
 - Nome: {nome}
 - Score: {score}
-- Limite atual: R$ {limite:,.2f}
+- Limite atual: {limite_brl}
 
 Responda de forma natural e amigável.
 """
@@ -88,13 +92,6 @@ class CreditAgent:
         score = credit_info["score"]
         current_limit = credit_info["limite_credito"]
 
-        # Se a última mensagem adicionada é uma resposta do agente (ex: vinda da entrevista)
-        # e o agente atual mudou para 'credit', nós não processamos a mensagem do usuário novamente.
-        if messages and isinstance(messages[-1], AIMessage):
-             # Isso garante que se acabamos de retornar de outro agente de forma assíncrona/handoff
-             # nós não reprocessamos a resposta anterior do usuário.
-             return {"current_agent": "credit"}
-
         # Verificar a última mensagem do usuário
         human_messages = [m for m in messages if isinstance(m, HumanMessage)]
         if not human_messages:
@@ -105,8 +102,8 @@ class CreditAgent:
         # Verificar se quer encerrar
         if self._wants_to_end(last_message):
             farewell = (
-                f"Certo, {first_name}! 😊 Se precisar de algo mais, estou aqui. "
-                f"Obrigado por usar o Banco Ágil! 👋"
+                f"Certo, {first_name}! Se precisar de algo mais, estou aqui. "
+                f"Obrigado por usar o Banco Ágil!"
             )
             return {
                 "messages": [AIMessage(content=farewell)],
@@ -117,14 +114,16 @@ class CreditAgent:
         # Verificar se quer ir para outro serviço
         if self._wants_exchange(last_message):
             return {
-                "messages": [AIMessage(content=f"Claro, {first_name}! Vou consultar a cotação para você. 💱")],
+                "messages": [
+                    AIMessage(content=f"Claro, {first_name}! Vou consultar a cotação para você.")
+                ],
                 "current_agent": "exchange",
             }
 
         # Verificar se mencionou entrevista de crédito
         if self._wants_interview(last_message, credit_request_data):
             response = (
-                f"Ótima escolha, {first_name}! 📝 Vamos iniciar uma breve entrevista "
+                f"Ótima escolha, {first_name}! Vamos iniciar uma breve entrevista "
                 f"para reavaliar seu perfil de crédito.\n\n"
                 f"Isso pode melhorar seu score e, consequentemente, seu limite disponível."
             )
@@ -146,7 +145,7 @@ class CreditAgent:
             response = (
                 f"{first_name}, para solicitar um aumento de limite, "
                 f"me informe o **valor desejado** para seu novo limite.\n\n"
-                f"Seu limite atual é de **R$ {current_limit:,.2f}**.\n"
+                f"Seu limite atual é de **{format_brl(current_limit)}**.\n"
                 f"Qual valor gostaria de solicitar?"
             )
             return {
@@ -161,9 +160,9 @@ class CreditAgent:
         # Resposta genérica
         response = (
             f"{first_name}, posso te ajudar com:\n\n"
-            f"• 📊 **Consultar** seu limite e score de crédito\n"
-            f"• 📈 **Solicitar aumento** de limite (informe o valor desejado)\n"
-            f"• 💱 **Câmbio** — Consultar cotação de moedas\n\n"
+            f"• **Consultar** seu limite e score de crédito\n"
+            f"• **Solicitar aumento** de limite (informe o valor desejado)\n"
+            f"• **Câmbio** — Consultar cotação de moedas\n\n"
             f"O que deseja?"
         )
         return {
@@ -176,9 +175,9 @@ class CreditAgent:
         response = (
             f"Aqui estão suas informações de crédito, {name}:\n\n"
             f"• **Score de crédito:** {score} pontos\n"
-            f"• **Limite atual:** R$ {limit:,.2f}\n\n"
+            f"• **Limite atual:** {format_brl(limit)}\n\n"
             f"Deseja **solicitar um aumento de limite**? "
-            f"Se sim, me informe o valor desejado. 😊"
+            f"Se sim, me informe o valor desejado."
         )
         return {
             "messages": [AIMessage(content=response)],
@@ -198,8 +197,8 @@ class CreditAgent:
 
         if requested_limit <= current_limit:
             response = (
-                f"{name}, o valor solicitado (R$ {requested_limit:,.2f}) é igual ou inferior "
-                f"ao seu limite atual (R$ {current_limit:,.2f}).\n\n"
+                f"{name}, o valor solicitado ({format_brl(requested_limit)}) é igual ou inferior "
+                f"ao seu limite atual ({format_brl(current_limit)}).\n\n"
                 f"Por favor, informe um valor **maior** que o limite atual."
             )
             return {
@@ -207,18 +206,31 @@ class CreditAgent:
                 "current_agent": "credit",
             }
 
-        # Verificar se o score permite
+        # Passo 1: Registrar pedido como 'pendente'
+        register_credit_request(cpf, current_limit, requested_limit, "pendente")
+
+        # Passo 2: Verificar se o score permite
         result = check_score_limit(score, requested_limit)
 
         if result["approved"]:
-            # Aprovado — registrar
-            register_credit_request(cpf, current_limit, requested_limit, "aprovado")
+            # Passo 3a: Atualizar status para 'aprovado'
+            update_credit_request_status(cpf, "aprovado")
+            # Passo 3b: Persistir novo limite na base de clientes
+            update_client_limit(cpf, requested_limit)
+
+            audit_logger.info(
+                "limit_increase_approved | cpf=%s*** | old_limit=%.2f | new_limit=%.2f | score=%d",
+                cpf[:4],
+                current_limit,
+                requested_limit,
+                score,
+            )
 
             response = (
-                f"🎉 **Solicitação aprovada!**\n\n"
+                f"**Solicitação aprovada!**\n\n"
                 f"Seu pedido de aumento de limite foi **aprovado**:\n\n"
-                f"• Limite anterior: R$ {current_limit:,.2f}\n"
-                f"• Novo limite: R$ {requested_limit:,.2f}\n"
+                f"• Limite anterior: {format_brl(current_limit)}\n"
+                f"• Novo limite: {format_brl(requested_limit)}\n"
                 f"• Score atual: {score} pontos\n\n"
                 f"O novo limite já está disponível, {name}! "
                 f"Posso te ajudar com mais alguma coisa?"
@@ -226,20 +238,36 @@ class CreditAgent:
             return {
                 "messages": [AIMessage(content=response)],
                 "current_agent": "credit",
+                "client_data": {
+                    "cpf": cpf,
+                    "nome": name,
+                    "score": score,
+                    "limite_credito": requested_limit,
+                },
                 "credit_request_data": {
                     "requested": requested_limit,
                     "status": "aprovado",
                 },
             }
         else:
-            # Rejeitado — registrar e oferecer entrevista
-            register_credit_request(cpf, current_limit, requested_limit, "rejeitado")
+            # Passo 3b: Atualizar status para 'rejeitado' e oferecer entrevista
+            update_credit_request_status(cpf, "rejeitado")
+
+            audit_logger.info(
+                "limit_increase_rejected | cpf=%s*** | requested=%.2f"
+                " | score=%d | max_allowed=%.2f | reason=%s",
+                cpf[:4],
+                requested_limit,
+                score,
+                result.get("max_allowed", 0),
+                result.get("reason", "unknown"),
+            )
 
             response = (
-                f"😔 **Solicitação não aprovada**\n\n"
+                f"**Solicitação não aprovada**\n\n"
                 f"{result['reason']}\n\n"
                 f"Mas não se preocupe, {name}! Temos uma alternativa:\n\n"
-                f"📝 Posso te direcionar para uma **entrevista de crédito** rápida. "
+                f"Posso te direcionar para uma **entrevista de crédito** rápida. "
                 f"Nela coletamos alguns dados financeiros atualizados e recalculamos "
                 f"seu score, o que pode aumentar seu limite disponível.\n\n"
                 f"**Deseja fazer a entrevista de crédito?** (sim/não)"
@@ -263,27 +291,27 @@ class CreditAgent:
             val_str = k_match.group(1).replace(",", ".")
             return float(val_str) * 1000
 
-        # Pega qualquer sequencia de digitos com possiveis pontos ou virgulas
-        number_match = re.search(r"\b(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\b", text_clean)
+        number_pattern = r"\b(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\b"
+        number_match = re.search(number_pattern, text_clean)
         if number_match:
             raw = number_match.group(1)
             # conta quantos digitos apos ultimo delimitador
-            if ',' in raw and '.' in raw:
+            if "," in raw and "." in raw:
                 # ex 5.000,00
-                val_str = raw.replace('.', '').replace(',', '.')
+                val_str = raw.replace(".", "").replace(",", ".")
                 return float(val_str)
-            elif ',' in raw:
-                parts = raw.split(',')
+            elif "," in raw:
+                parts = raw.split(",")
                 if len(parts[-1]) in [1, 2]:
-                    return float(raw.replace(',', '.'))
+                    return float(raw.replace(",", "."))
                 else:
-                    return float(raw.replace(',', ''))
-            elif '.' in raw:
-                parts = raw.split('.')
+                    return float(raw.replace(",", ""))
+            elif "." in raw:
+                parts = raw.split(".")
                 if len(parts[-1]) in [1, 2]:
                     return float(raw)
                 else:
-                    return float(raw.replace('.', ''))
+                    return float(raw.replace(".", ""))
             else:
                 return float(raw)
 
@@ -306,15 +334,23 @@ class CreditAgent:
         return any(re.search(p, message.lower()) for p in end_patterns)
 
     @staticmethod
-    def _wants_increase(message: str, credit_request_data: dict | None = None) -> bool:
+    def _wants_increase(
+        message: str,
+        credit_request_data: dict | None = None,
+    ) -> bool:
         msg_lower = message.lower().strip()
-        
-        # Se exibimos a info de crédito e perguntamos "Deseja solicitar aumento?", e o usuário diz sim
+
+        # Se exibimos a info de crédito e perguntamos
+        # "Deseja solicitar aumento?", e o usuário diz sim
         if credit_request_data and credit_request_data.get("status") in ["info_shown"]:
-            # Aceita apenas respostas curtas afirmativas, pois se ele descrever a intenção as regras normais pegam.
-            if re.match(r"^(sim|isso|exato|positivo|com certeza|quero|gostaria|pode ser|bora|vamos)[!\.,\s]*$", msg_lower):
+            # Aceita respostas curtas afirmativas
+            afirmativo = (
+                r"^(sim|isso|exato|positivo|com certeza"
+                r"|quero|gostaria|pode ser|bora|vamos)[!\.,\s]*$"
+            )
+            if re.match(afirmativo, msg_lower):
                 return True
-                
+
         patterns = [
             r"\b(aument|subi|elev|altera|muda|alter|mais|maior|novo)\w*\b.*\b(limit|cr[eé]dit)\w*\b",
             r"\b(limit|cr[eé]dit)\w*\b.*\b(aument|subi|elev|maior|alter|mais|novo)\w*\b",
@@ -340,7 +376,7 @@ class CreditAgent:
     @staticmethod
     def _wants_interview(message: str, credit_request_data: dict | None = None) -> bool:
         msg_lower = message.lower()
-        
+
         # Se um aumento foi rejeitado recentemente e a entrevista foi oferecida
         if credit_request_data and credit_request_data.get("status") == "rejeitado":
             patterns = [
@@ -352,5 +388,5 @@ class CreditAgent:
             patterns = [
                 r"\b(entrevista|entr)\w*\b",
             ]
-            
+
         return any(re.search(p, msg_lower) for p in patterns)

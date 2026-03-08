@@ -9,7 +9,6 @@ from __future__ import annotations
 import csv
 import logging
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
 
@@ -55,9 +54,7 @@ def authenticate_client(cpf: str, birth_date: str) -> dict | None:
         df["cpf"] = df["cpf"].astype(str).str.strip()
         df["data_nascimento"] = df["data_nascimento"].astype(str).str.strip()
 
-        match = df[
-            (df["cpf"] == cpf_clean) & (df["data_nascimento"] == birth_normalized)
-        ]
+        match = df[(df["cpf"] == cpf_clean) & (df["data_nascimento"] == birth_normalized)]
 
         if match.empty:
             logger.info("Autenticação falhou para CPF=%s", cpf_clean[:4] + "***")
@@ -75,12 +72,12 @@ def _normalize_date(date_str: str) -> str | None:
     """Normaliza diversos formatos de data para YYYY-MM-DD."""
     date_str = date_str.strip()
     formats = [
-        "%Y-%m-%d",      # 1990-05-15
-        "%d/%m/%Y",      # 15/05/1990
-        "%d-%m-%Y",      # 15-05-1990
-        "%d.%m.%Y",      # 15.05.1990
-        "%d %m %Y",      # 15 05 1990
-        "%d%m%Y",        # 15051990 (Sem pontuação)
+        "%Y-%m-%d",  # 1990-05-15
+        "%d/%m/%Y",  # 15/05/1990
+        "%d-%m-%Y",  # 15-05-1990
+        "%d.%m.%Y",  # 15.05.1990
+        "%d %m %Y",  # 15 05 1990
+        "%d%m%Y",  # 15051990 (Sem pontuação)
     ]
     for fmt in formats:
         try:
@@ -178,13 +175,15 @@ def register_credit_request(
         with open(REQUESTS_CSV, "a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             if not file_exists:
-                writer.writerow([
-                    "cpf_cliente",
-                    "data_hora_solicitacao",
-                    "limite_atual",
-                    "novo_limite_solicitado",
-                    "status_pedido",
-                ])
+                writer.writerow(
+                    [
+                        "cpf_cliente",
+                        "data_hora_solicitacao",
+                        "limite_atual",
+                        "novo_limite_solicitado",
+                        "status_pedido",
+                    ]
+                )
             writer.writerow(row)
 
         logger.info(
@@ -197,6 +196,45 @@ def register_credit_request(
         return True
     except Exception as e:
         logger.error("Erro ao registrar solicitação: %s", e)
+        return False
+
+
+def update_credit_request_status(cpf: str, new_status: str) -> bool:
+    """Atualiza o status da última solicitação de aumento de limite de um cliente.
+
+    Fluxo do case: solicitação é criada como 'pendente' e depois atualizada
+    para 'aprovado' ou 'rejeitado' após checagem de score.
+
+    Args:
+        cpf: CPF do cliente.
+        new_status: 'aprovado' ou 'rejeitado'.
+
+    Returns:
+        True se atualizou com sucesso.
+    """
+    cpf_clean = cpf.replace(".", "").replace("-", "").strip()
+    try:
+        df = pd.read_csv(REQUESTS_CSV, dtype={"cpf_cliente": str})
+        df["cpf_cliente"] = df["cpf_cliente"].astype(str).str.strip()
+        mask = df["cpf_cliente"] == cpf_clean
+
+        if not mask.any():
+            logger.warning("Solicitação não encontrada para CPF=%s", cpf_clean[:4] + "***")
+            return False
+
+        # Atualiza a última solicitação do cliente
+        last_idx = df[mask].index[-1]
+        df.loc[last_idx, "status_pedido"] = new_status
+        df.to_csv(REQUESTS_CSV, index=False)
+
+        logger.info(
+            "Status atualizado: CPF=%s → %s",
+            cpf_clean[:4] + "***",
+            new_status,
+        )
+        return True
+    except Exception as e:
+        logger.error("Erro ao atualizar status da solicitação: %s", e)
         return False
 
 
@@ -228,4 +266,37 @@ def update_client_score(cpf: str, new_score: int) -> bool:
         return True
     except Exception as e:
         logger.error("Erro ao atualizar score: %s", e)
+        return False
+
+
+def update_client_limit(cpf: str, new_limit: float) -> bool:
+    """Atualiza o limite de crédito de um cliente na base.
+
+    Args:
+        cpf: CPF do cliente.
+        new_limit: Novo limite de crédito.
+
+    Returns:
+        True se atualizou com sucesso.
+    """
+    cpf_clean = cpf.replace(".", "").replace("-", "").strip()
+    try:
+        df = read_clients()
+        df["cpf"] = df["cpf"].astype(str).str.strip()
+        mask = df["cpf"] == cpf_clean
+
+        if not mask.any():
+            logger.warning(
+                "Cliente não encontrado para atualizar limite: %s",
+                cpf_clean[:4] + "***",
+            )
+            return False
+
+        df.loc[mask, "limite_credito"] = new_limit
+        df.to_csv(CLIENTS_CSV, index=False)
+
+        logger.info("Limite atualizado: CPF=%s novo_limite=%.2f", cpf_clean[:4] + "***", new_limit)
+        return True
+    except Exception as e:
+        logger.error("Erro ao atualizar limite: %s", e)
         return False

@@ -18,6 +18,7 @@ import re
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from src.agents._helpers import wants_to_end
 from src.core.llm_factory import LLMFactory
 from src.schemas.state import BankState
 from src.tools.csv_tools import authenticate_client
@@ -78,7 +79,7 @@ def _extract_date(text: str) -> str | None:
         r"\d{2}-\d{2}-\d{4}",
         r"\d{2}\.\d{2}\.\d{4}",
         r"\d{4}-\d{2}-\d{2}",
-        r"\b\d{8}\b"
+        r"\b\d{8}\b",
     ]
     for pattern in patterns:
         match = re.search(pattern, text)
@@ -113,7 +114,7 @@ class TriageAgent:
         human_messages = [m for m in messages if isinstance(m, HumanMessage)]
         if not human_messages:
             greeting = (
-                "Olá! 👋 Bem-vindo(a) ao **Banco Ágil**! "
+                "Olá! Bem-vindo(a) ao **Banco Ágil**! "
                 "Sou seu assistente virtual e estou aqui para te ajudar.\n\n"
                 "Para começar, preciso verificar sua identidade. "
                 "Poderia me informar seu **CPF**?"
@@ -126,10 +127,10 @@ class TriageAgent:
         last_message = human_messages[-1].content
 
         # Verificar se quer encerrar
-        if self._wants_to_end(last_message):
+        if wants_to_end(last_message):
             farewell = (
-                "Tudo bem! 😊 Obrigado(a) por entrar em contato com o Banco Ágil. "
-                "Volte quando precisar. Tenha um ótimo dia! 👋"
+                "Tudo bem! Obrigado(a) por entrar em contato com o Banco Ágil. "
+                "Volte quando precisar. Tenha um ótimo dia!"
             )
             return {
                 "messages": [AIMessage(content=farewell)],
@@ -148,9 +149,8 @@ class TriageAgent:
             cpf = _extract_cpf(last_message)
             if cpf:
                 response = (
-                    f"Obrigado! CPF recebido. ✅\n\n"
-                    f"Agora, por favor, informe sua **data de nascimento** "
-                    f"(formato: DD/MM/AAAA)."
+                    "Obrigado! CPF recebido.\n\n"
+                    "Agora, por favor, informe sua **data de nascimento**. "
                 )
                 return {
                     "messages": [AIMessage(content=response)],
@@ -160,12 +160,20 @@ class TriageAgent:
             else:
                 # Deixar o LLM responder de forma amigável se o usuário não enviou o CPF
                 try:
-                    sys_msg = SystemMessage(
-                        content=_TRIAGE_SYSTEM_PROMPT
+                    sys_msg = SystemMessage(content=_TRIAGE_SYSTEM_PROMPT)
+                    _cpf_reminder = (
+                        "ATENÇÃO ESTRITA: O sistema técnico não encontrou "
+                        "um CPF válido (11 dígitos) na última mensagem do "
+                        "usuário. Você NÃO PODE prosseguir com nenhum "
+                        "atendimento, NÃO PODE confirmar identidade, e "
+                        "NÃO PODE oferecer serviços. Se o usuário fez uma "
+                        "pergunta (por exemplo, 'por que preciso informar "
+                        "isso?'), responda de forma educada explicando que "
+                        "o CPF é necessário para identificação e garantir "
+                        "a segurança da conta. Depois, peça que ele "
+                        "digite o CPF."
                     )
-                    reminder_msg = SystemMessage(
-                        content="ATENÇÃO ESTRITA: O sistema técnico não encontrou um CPF válido (11 dígitos) na última mensagem do usuário. Você NÃO PODE prosseguir com nenhum atendimento, NÃO PODE confirmar identidade, e NÃO PODE oferecer serviços. Responda amigavelmente ao que o usuário disse e exija que ele digite o CPF."
-                    )
+                    reminder_msg = SystemMessage(content=_cpf_reminder)
                     llm_response = self._llm.invoke([sys_msg] + messages + [reminder_msg])
                     response = llm_response.content
                 except Exception as e:
@@ -175,7 +183,7 @@ class TriageAgent:
                         "Por favor, informe seu CPF com 11 dígitos "
                         "(exemplo: 123.456.789-01 ou 12345678901)."
                     )
-                
+
                 return {
                     "messages": [AIMessage(content=response)],
                     "current_agent": "triage",
@@ -187,15 +195,28 @@ class TriageAgent:
             if date:
                 collected_birth_date = date
             else:
-                # Deixar o LLM responder de forma amigável se o usuário não enviou a data de nascimento
+                # Deixar o LLM responder de forma amigável
+                # se o usuário não enviou a data de nascimento
                 try:
-                    sys_msg = SystemMessage(
-                        content=_TRIAGE_SYSTEM_PROMPT
+                    sys_msg = SystemMessage(content=_TRIAGE_SYSTEM_PROMPT)
+                    _date_reminder = (
+                        "ATENÇÃO ESTRITA: O sistema técnico rejeitou a "
+                        "última mensagem porque não contém uma data "
+                        "válida (ex. DD/MM/AAAA). O usuário já informou "
+                        "o CPF, mas FALTA A DATA DE NASCIMENTO. Você "
+                        "NÃO PODE oferecer serviços, nem concluir a "
+                        "autenticação ainda. Se o usuário fez uma "
+                        "pergunta (por exemplo, 'por que preciso "
+                        "informar isso?'), responda de forma educada "
+                        "explicando que a data de nascimento é "
+                        "necessária para confirmar sua identidade e "
+                        "garantir a segurança da conta. Depois, peça "
+                        "novamente a data de nascimento."
                     )
-                    reminder_msg = SystemMessage(
-                        content="ATENÇÃO ESTRITA: O sistema técnico rejeitou a última mensagem porque não contém uma data válida (ex. DD/MM/AAAA). O usuário já informou o CPF, mas FALTA A DATA DE NASCIMENTO. Você NÃO PODE oferecer serviços, nem concluir a autenticação ainda. Peça que ele forneça a data de nascimento."
+                    reminder_msg = SystemMessage(content=_date_reminder)
+                    llm_response = self._llm.invoke(
+                        [sys_msg] + messages[:-1] + [messages[-1], reminder_msg]
                     )
-                    llm_response = self._llm.invoke([sys_msg] + messages[:-1] + [messages[-1], reminder_msg])
                     response = llm_response.content
                 except Exception as e:
                     logger.error("Erro ao gerar resposta com LLM: %s", e)
@@ -204,7 +225,7 @@ class TriageAgent:
                         "Por favor, informe no formato **DD/MM/AAAA** "
                         "(exemplo: 15/05/1990)."
                     )
-                
+
                 return {
                     "messages": [AIMessage(content=response)],
                     "current_agent": "triage",
@@ -214,13 +235,12 @@ class TriageAgent:
         client = authenticate_client(collected_cpf, collected_birth_date)
 
         if client:
-            client_name = client["nome"].split()[0]  # primeiro nome
             response = (
-                f"Autenticação realizada com sucesso! ✅\n\n"
-                f"Olá, **{client['nome']}**! Como posso te ajudar hoje?\n\n"
+                f"Autenticação realizada com sucesso!\n\n"
+                f"Olá, **{client['nome'].split()[0]}**! Como posso te ajudar hoje?\n\n"
                 f"Nossos serviços disponíveis:\n"
-                f"• 💳 **Crédito** — Consultar limite ou solicitar aumento\n"
-                f"• 💱 **Câmbio** — Consultar cotação de moedas\n\n"
+                f"• **Crédito** — Consultar limite ou solicitar aumento\n"
+                f"• **Câmbio** — Consultar cotação de moedas\n\n"
                 f"O que você gostaria de fazer?"
             )
             return {
@@ -237,11 +257,11 @@ class TriageAgent:
 
             if new_attempts >= 3:
                 response = (
-                    "Infelizmente não conseguimos validar seus dados após 3 tentativas. 😔\n\n"
+                    "Infelizmente não conseguimos validar seus dados após 3 tentativas.\n\n"
                     "Por segurança, precisamos encerrar este atendimento. "
                     "Por favor, entre em contato com nossa central pelo **0800-123-4567** "
                     "ou procure uma de nossas agências.\n\n"
-                    "Obrigado(a) pela compreensão! 🙏"
+                    "Obrigado(a) pela compreensão!"
                 )
                 return {
                     "messages": [AIMessage(content=response)],
@@ -254,9 +274,9 @@ class TriageAgent:
             else:
                 remaining = 3 - new_attempts
                 response = (
-                    f"Desculpe, não encontrei um cadastro com esses dados. 😕\n\n"
+                    f"Desculpe, não encontrei um cadastro com esses dados.\n\n"
                     f"Você ainda tem **{remaining}** tentativa(s). "
-                    f"Por favor, informe seu **CPF** novamente."
+                    f"Vamos tentar de novo — por favor, informe seu **CPF**."
                 )
                 return {
                     "messages": [AIMessage(content=response)],
@@ -279,25 +299,21 @@ class TriageAgent:
         client_name = state.get("client_data", {}).get("nome", "").split()[0]
 
         if "credito" in route or "crédito" in route:
-            response_text = (
-                f"Perfeito, {client_name}! Vou te ajudar com questões de crédito. 💳"
-            )
+            response_text = f"Perfeito, {client_name}! Vou te ajudar com questões de crédito."
             return {
                 "messages": [AIMessage(content=response_text)],
                 "current_agent": "credit",
             }
         elif "cambio" in route or "câmbio" in route:
-            response_text = (
-                f"Claro, {client_name}! Vou consultar a cotação para você. 💱"
-            )
+            response_text = f"Claro, {client_name}! Vou consultar a cotação para você."
             return {
                 "messages": [AIMessage(content=response_text)],
                 "current_agent": "exchange",
             }
         elif "sair" in route:
             farewell = (
-                f"Tudo bem, {client_name}! 😊 Obrigado(a) por usar o Banco Ágil. "
-                f"Volte quando precisar. Tenha um ótimo dia! 👋"
+                f"Tudo bem, {client_name}! Obrigado(a) por usar o Banco Ágil. "
+                f"Volte quando precisar. Tenha um ótimo dia!"
             )
             return {
                 "messages": [AIMessage(content=farewell)],
@@ -308,21 +324,11 @@ class TriageAgent:
             response_text = (
                 f"{client_name}, não entendi bem o que você precisa. "
                 f"Posso te ajudar com:\n\n"
-                f"• 💳 **Crédito** — Consultar limite ou solicitar aumento\n"
-                f"• 💱 **Câmbio** — Consultar cotação de moedas\n\n"
+                f"• **Crédito** — Consultar limite ou solicitar aumento\n"
+                f"• **Câmbio** — Consultar cotação de moedas\n\n"
                 f"O que deseja?"
             )
             return {
                 "messages": [AIMessage(content=response_text)],
                 "current_agent": "triage",
             }
-
-    @staticmethod
-    def _wants_to_end(message: str) -> bool:
-        """Verifica se o usuário quer encerrar o atendimento."""
-        end_patterns = [
-            r"\b(sair|encerrar|tchau|adeus|finalizar|fechar|obrigad[oa])\b",
-            r"\b(bye|exit|quit|close)\b",
-        ]
-        msg_lower = message.lower()
-        return any(re.search(p, msg_lower) for p in end_patterns)

@@ -15,7 +15,7 @@ PESO_RENDA: int = 30
 PESO_EMPREGO: dict[str, int] = {
     "formal": 300,
     "autônomo": 200,
-    "autonomo": 200,   # sem acento, para robustez
+    "autonomo": 200,  # sem acento, para robustez
     "desempregado": 0,
 }
 
@@ -77,10 +77,7 @@ def calculate_score(
 
     # Score bruto
     score_bruto = (
-        componente_renda
-        + componente_emprego
-        + componente_dependentes
-        + componente_dividas
+        componente_renda + componente_emprego + componente_dependentes + componente_dividas
     )
 
     # Clamp 0-1000

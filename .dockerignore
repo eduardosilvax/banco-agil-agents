@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.env
+.env.example
+.pytest_cache/
+.ruff_cache/
+# docs/
+tests/
+# *.md
+!requirements.txt

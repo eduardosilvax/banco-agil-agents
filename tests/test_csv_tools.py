@@ -1,9 +1,6 @@
 # Testes unitários para as operações CSV.
 # Usa arquivos temporários para não afetar os dados reais.
 
-import csv
-import os
-import tempfile
 
 import pandas as pd
 import pytest
@@ -112,24 +109,49 @@ class TestScoreLimit:
 
 
 class TestCreditRequest:
-    """Testes de registro de solicitação."""
+    """Testes de registro e atualização de solicitação."""
 
-    def test_register_approved(self):
-        success = csv_tools.register_credit_request(
-            "12345678901", 5000, 7000, "aprovado"
-        )
+    def test_register_pending_then_approve(self):
+        """Fluxo completo: registra como pendente, depois atualiza para aprovado."""
+        # Passo 1: Registrar como pendente
+        success = csv_tools.register_credit_request("12345678901", 5000, 7000, "pendente")
         assert success is True
 
-        # Verificar que o CSV foi atualizado
+        df = pd.read_csv(csv_tools.REQUESTS_CSV)
+        assert len(df) == 1
+        assert df.iloc[0]["status_pedido"] == "pendente"
+
+        # Passo 2: Atualizar para aprovado
+        success = csv_tools.update_credit_request_status("12345678901", "aprovado")
+        assert success is True
+
+        df = pd.read_csv(csv_tools.REQUESTS_CSV)
+        assert df.iloc[0]["status_pedido"] == "aprovado"
+
+    def test_register_pending_then_reject(self):
+        """Fluxo completo: registra como pendente, depois atualiza para rejeitado."""
+        success = csv_tools.register_credit_request("98765432100", 2000, 5000, "pendente")
+        assert success is True
+
+        success = csv_tools.update_credit_request_status("98765432100", "rejeitado")
+        assert success is True
+
+        df = pd.read_csv(csv_tools.REQUESTS_CSV)
+        assert df.iloc[0]["status_pedido"] == "rejeitado"
+
+    def test_update_nonexistent_request(self):
+        """Atualizar status de CPF sem solicitação retorna False."""
+        success = csv_tools.update_credit_request_status("00000000000", "aprovado")
+        assert success is False
+
+    def test_register_approved_directly(self):
+        """Registro direto com status final (backward compat)."""
+        success = csv_tools.register_credit_request("12345678901", 5000, 7000, "aprovado")
+        assert success is True
+
         df = pd.read_csv(csv_tools.REQUESTS_CSV)
         assert len(df) == 1
         assert df.iloc[0]["status_pedido"] == "aprovado"
-
-    def test_register_rejected(self):
-        success = csv_tools.register_credit_request(
-            "98765432100", 2000, 5000, "rejeitado"
-        )
-        assert success is True
 
 
 class TestScoreUpdate:
@@ -153,3 +175,26 @@ class TestScoreUpdate:
     def test_update_nonexistent_client(self):
         success = csv_tools.update_client_score("00000000000", 500)
         assert success is False
+
+
+class TestLimitUpdate:
+    """Testes de atualização de limite de crédito."""
+
+    def test_update_valid_client(self):
+        success = csv_tools.update_client_limit("12345678901", 12000.0)
+        assert success is True
+
+        credit = csv_tools.get_client_credit("12345678901")
+        assert credit["limite_credito"] == 12000.0
+
+    def test_update_nonexistent_client(self):
+        success = csv_tools.update_client_limit("00000000000", 5000.0)
+        assert success is False
+
+    def test_update_persists_other_fields(self):
+        """Atualizar limite não altera score nem nome."""
+        csv_tools.update_client_limit("12345678901", 9000.0)
+        credit = csv_tools.get_client_credit("12345678901")
+        assert credit["limite_credito"] == 9000.0
+        assert credit["score"] == 750
+        assert credit["nome"] == "Ana Silva"

@@ -17,6 +17,7 @@ import re
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+from src.agents._helpers import wants_to_end
 from src.core.llm_factory import LLMFactory
 from src.schemas.state import BankState
 from src.tools.csv_tools import update_client_score
@@ -28,9 +29,7 @@ logger = logging.getLogger("banco_agil.credit_interview")
 _INTERVIEW_QUESTIONS = [
     {
         "field": "renda_mensal",
-        "question": (
-            "**Pergunta 1/5:** Qual é sua **renda mensal** bruta (em R$)?"
-        ),
+        "question": ("**Pergunta 1/5:** Qual é sua **renda mensal** bruta (em R$)?"),
         "type": "float",
     },
     {
@@ -97,10 +96,10 @@ class CreditInterviewAgent:
         # Verificar se quer encerrar
         if human_messages:
             last_msg = human_messages[-1].content.lower()
-            if self._wants_to_end(last_msg):
+            if wants_to_end(last_msg):
                 farewell = (
                     f"Tudo bem, {first_name}! A entrevista foi cancelada. "
-                    f"Se mudar de ideia, estou aqui. 😊\n\n"
+                    f"Se mudar de ideia, estou aqui.\n\n"
                     f"Posso te ajudar com mais alguma coisa?"
                 )
                 return {
@@ -150,7 +149,7 @@ class CreditInterviewAgent:
 
         # Na primeira ativação, adicionar texto de boas-vindas
         if current_step == 0 and not waiting_for_answer:
-            msg = f"Vamos começar a entrevista! 📝\n\n{msg}"
+            msg = f"Vamos começar a entrevista!\n\n{msg}"
 
         return {
             "messages": [AIMessage(content=msg)],
@@ -185,15 +184,14 @@ class CreditInterviewAgent:
 
         if updated:
             diff = new_score - old_score
-            diff_emoji = "📈" if diff > 0 else "📉" if diff < 0 else "➡️"
             diff_text = f"+{diff}" if diff > 0 else str(diff)
 
             response = (
-                f"✅ **Entrevista finalizada!**\n\n"
+                f"**Entrevista finalizada!**\n\n"
                 f"Aqui está o resultado da sua reavaliação, {name}:\n\n"
                 f"• Score anterior: **{old_score}** pontos\n"
-                f"• Score atualizado: **{new_score}** pontos {diff_emoji} ({diff_text})\n\n"
-                f"{'Ótimas notícias! Seu score melhorou! 🎉' if diff > 0 else ''}"
+                f"• Score atualizado: **{new_score}** pontos ({diff_text})\n\n"
+                f"{'Ótimas notícias! Seu score melhorou!' if diff > 0 else ''}"
                 f"\n\nVou verificar novamente suas opções de crédito com o score atualizado..."
             )
             return {
@@ -213,7 +211,7 @@ class CreditInterviewAgent:
                 "interview_data": None,
             }
 
-    def _parse_answer(self, text: str, answer_type: str) -> any:
+    def _parse_answer(self, text: str, answer_type: str) -> float | str | int | None:
         """Parseia a resposta do usuário conforme o tipo esperado."""
         text = text.strip()
 
@@ -240,7 +238,9 @@ class CreditInterviewAgent:
                 return "formal"
             elif any(w in text_lower for w in ["autônom", "autonom", "freelanc", "mei", "liberal"]):
                 return "autônomo"
-            elif any(w in text_lower for w in ["desempreg", "sem emprego", "não trabalh", "nao trabalh"]):
+            elif any(
+                w in text_lower for w in ["desempreg", "sem emprego", "não trabalh", "nao trabalh"]
+            ):
                 return "desempregado"
             return None
 
@@ -267,7 +267,10 @@ class CreditInterviewAgent:
     def _get_error_message(answer_type: str) -> str:
         """Retorna mensagem de erro adequada para cada tipo."""
         errors = {
-            "float": "Não consegui entender o valor. Por favor, informe um número (ex: 5000 ou 5.000,00).",
+            "float": (
+                "Não consegui entender o valor. "
+                "Por favor, informe um número (ex: 5000 ou 5.000,00)."
+            ),
             "employment": (
                 "Não entendi. Por favor, responda com uma das opções:\n"
                 "• **Formal** (CLT, servidor)\n"
@@ -278,10 +281,3 @@ class CreditInterviewAgent:
             "boolean": "Não entendi. Por favor, responda **sim** ou **não**.",
         }
         return errors.get(answer_type, "Desculpe, não entendi. Pode repetir?")
-
-    @staticmethod
-    def _wants_to_end(message: str) -> bool:
-        patterns = [
-            r"\b(sair|encerrar|cancelar|desistir|parar)\b",
-        ]
-        return any(re.search(p, message.lower()) for p in patterns)

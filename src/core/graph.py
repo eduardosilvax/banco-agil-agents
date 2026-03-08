@@ -14,6 +14,7 @@ import logging
 
 from langgraph.graph import END, StateGraph
 
+from src.agents.compliance import ComplianceAgent
 from src.agents.credit import CreditAgent
 from src.agents.credit_interview import CreditInterviewAgent
 from src.agents.exchange import ExchangeAgent
@@ -24,6 +25,22 @@ from src.schemas.state import BankState
 logger = logging.getLogger("banco_agil.graph")
 
 _VALID_AGENTS = {"triage", "credit", "credit_interview", "exchange"}
+
+# Número máximo de mensagens mantidas no contexto (system + últimas N)
+_MAX_MESSAGES = 20
+
+
+def _trim_messages(state: BankState) -> dict:
+    """Limita o histórico de mensagens para evitar explosão de tokens.
+
+    Mantém a primeira mensagem (system/context) + as últimas _MAX_MESSAGES-1.
+    """
+    messages = state.get("messages", [])
+    if len(messages) <= _MAX_MESSAGES:
+        return {}
+    trimmed = messages[:1] + messages[-(_MAX_MESSAGES - 1) :]
+    logger.info("Histórico trimmed: %d → %d mensagens", len(messages), len(trimmed))
+    return {"messages": trimmed}
 
 
 def _entry_router(state: BankState) -> str:
@@ -74,16 +91,26 @@ def _make_router(source_node: str):
     return _router
 
 
-def build_graph(llm_factory: LLMFactory | None = None) -> StateGraph:
+def _compliance_router(state: BankState) -> str:
+    """Router pós-compliance: se bloqueado → END, se aprovado → entry_router."""
+    if not state.get("compliance_approved", True):
+        logger.info("Compliance bloqueou a mensagem → END")
+        return END
+    return "entry_router"
+
+
+def build_graph(llm_factory: LLMFactory | None = None, checkpointer=None) -> StateGraph:
     """Monta e compila o pipeline multi-agente LangGraph.
 
     Fluxo:
-        START → entry_router → (triage | credit | credit_interview | exchange)
+        START → compliance → (entry_router | END)
+        entry_router → (triage | credit | credit_interview | exchange)
         Cada agente pode redirecionar para outro via current_agent.
     """
     factory = llm_factory or LLMFactory()
 
     # Instanciar agentes
+    compliance = ComplianceAgent(factory)
     triage = TriageAgent(factory)
     credit = CreditAgent(factory)
     credit_interview = CreditInterviewAgent(factory)
@@ -92,15 +119,28 @@ def build_graph(llm_factory: LLMFactory | None = None) -> StateGraph:
     # Construir grafo
     graph = StateGraph(BankState)
 
-    # Nó router de entrada (passthrough — apenas direciona)
+    # Nós
+    graph.add_node("trim_history", _trim_messages)
+    graph.add_node("compliance", compliance.run)
     graph.add_node("entry_router", lambda state: {})
     graph.add_node("triage", triage.run)
     graph.add_node("credit", credit.run)
     graph.add_node("credit_interview", credit_interview.run)
     graph.add_node("exchange", exchange.run)
 
-    # Entry point → router de entrada
-    graph.set_entry_point("entry_router")
+    # Entry point → trim_history → compliance (primeiro nó do grafo)
+    graph.set_entry_point("trim_history")
+    graph.add_edge("trim_history", "compliance")
+
+    # Compliance decide: aprovado → entry_router, bloqueado → END
+    graph.add_conditional_edges(
+        "compliance",
+        _compliance_router,
+        {
+            "entry_router": "entry_router",
+            END: END,
+        },
+    )
 
     # Router de entrada decide qual agente recebe a mensagem
     _routing_map = {
@@ -120,6 +160,6 @@ def build_graph(llm_factory: LLMFactory | None = None) -> StateGraph:
     graph.add_conditional_edges("credit_interview", _make_router("credit_interview"), _routing_map)
     graph.add_conditional_edges("exchange", _make_router("exchange"), _routing_map)
 
-    compiled = graph.compile()
-    logger.info("Pipeline LangGraph compilado com sucesso (4 agentes + entry router).")
+    compiled = graph.compile(checkpointer=checkpointer)
+    logger.info("Pipeline LangGraph compilado com sucesso (compliance + 4 agentes + entry router).")
     return compiled

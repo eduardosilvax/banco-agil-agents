@@ -30,8 +30,14 @@ Escolhi **LangGraph** (`StateGraph`) como orquestrador.
 4. **add_messages**: O LangGraph gerencia automaticamente o acúmulo de mensagens no histórico, simplificando o gerenciamento de conversação.
 5. **Handoffs bidirecionais**: O campo `current_agent` no state permite que qualquer agente redirecione para outro, suportando fluxos como crédito → entrevista → crédito.
 
+## Evolução: Nó `trim_history` no Grafo
+
+Com conversas longas, o histórico de mensagens crescia sem limite, degradando qualidade e custo. Adicionei um nó `trim_history` como **ponto de entrada** do grafo (`START → trim_history → compliance → ...`). Esse nó aplica uma janela deslizante de 20 mensagens, preservando a primeira mensagem (system context) + as últimas 19.
+
+A decisão de implementar como nó do grafo (e não como utility dentro de cada agente) garante que o trimming é auditável no trace do LangSmith e consistente — nenhum agente precisa se preocupar com tamanho de contexto.
+
 ## Consequências
 
-- **Positivas**: Pipeline testável nó a nó, fácil adicionar novos agentes, state visível em logs e na sidebar do Streamlit.
+- **Positivas**: Pipeline testável nó a nó, fácil adicionar novos agentes, state visível em logs e na sidebar do Streamlit. O nó `trim_history` protege contra explosão de tokens em conversas longas.
 - **Negativas**: Dependência do LangGraph (lock-in leve).
 - **Riscos mitigados**: Cada agente é uma classe Python pura — migrar para outro orquestrador exigiria apenas reescrever `graph.py`.
