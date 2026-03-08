@@ -540,7 +540,7 @@ banco-agil-agents/
 ### 1. Clone e configure
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/eduardosilvax/banco-agil-agents.git
 cd banco-agil-agents
 ```
 
